@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <title>QR Scan → Sheet</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+      body { font-family: Arial, sans-serif; margin: 0; padding: 0; text-align: center; background:#111; color:#eee; }
+      h3 { margin-top: 12px; }
+      #video { width: 100%; max-width: 420px; margin-top: 10px; background: #000; border-radius: 8px; }
+      #output { margin-top: 10px; font-size: 17px; }
+      #error { margin-top: 6px; color: #ff5555; font-size: 14px; }
+      #scanBtn, #sendBtn, #uploadLabel {
+        margin-top: 10px; padding: 10px 20px; font-size: 15px;
+        border-radius: 4px; border: none; color:#fff; cursor:pointer;
+      }
+      #scanBtn { background:#1976d2; }
+      #sendBtn { background:#2e7d32; margin-left: 4px; }
+      #uploadLabel { background:#8e24aa; margin-left: 4px; }
+      #fileInput { display:none; }
+    </style>
+  </head>
+  <body>
+    <h3>QR Scan → Google Sheet</h3>
+
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas" hidden></canvas>
+
+    <div id="output">Use camera or upload an image, then send to Sheet.</div>
+
+    <div>
+      <button id="scanBtn">Start Camera</button>
+      <label id="uploadLabel" for="fileInput">Upload Image</label>
+      <input type="file" id="fileInput" accept="image/*">
+      <button id="sendBtn" disabled>Send to Sheet</button>
+    </div>
+
+    <div id="error"></div>
+
+    <!-- jsQR library -->
+    <script src="https://cdn.jsdelivr.net/npm/jsqr/dist/jsQR.js"></script>
+    <script>
+      const video = document.getElementById('video');
+      const canvas = document.getElementById('canvas');
+      const ctx = canvas.getContext('2d');
+      const output = document.getElementById('output');
+      const scanBtn = document.getElementById('scanBtn');
+      const sendBtn = document.getElementById('sendBtn');
+      const fileInput = document.getElementById('fileInput');
+      const errorDiv = document.getElementById('error');
+
+      // PASTE YOUR APPS SCRIPT WEB APP URL HERE:
+      const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxsqSFLaDiYcrSrpDLgL2wDuWsrvjN1agxtbXbu5egDAXBOz7vk7j7oc7Bjn_l9G5SB/exec';
+
+      let stream = null;
+      let scanning = false;
+      let lastCode = null;
+
+      function showError(msg) {
+        console.error(msg);
+        errorDiv.textContent = msg;
+      }
+
+      function clearError() {
+        errorDiv.textContent = '';
+      }
+
+      function stopCamera() {
+        if (stream) {
+          stream.getTracks().forEach(t => t.stop());
+          stream = null;
+        }
+        scanning = false;
+        scanBtn.textContent = 'Start Camera';
+      }
+
+      function handleScannedText(text, via) {
+        lastCode = text;
+        output.textContent = 'Scanned (' + via + '): ' + lastCode;
+        sendBtn.disabled = false;
+      }
+
+      function tick() {
+        if (!scanning) return;
+
+        if (video.readyState === video.HAVE_ENOUGH_DATA) {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const code = jsQR(imageData.data, imageData.width, imageData.height, {
+            inversionAttempts: 'dontInvert',
+          });
+
+          if (code) {
+            handleScannedText(code.data, 'camera');
+            stopCamera();
+            return;
+          }
+        }
+        requestAnimationFrame(tick);
+      }
+
+      async function startCamera() {
+        clearError();
+        sendBtn.disabled = true;
+        lastCode = null;
+        output.textContent = 'Requesting camera...';
+        scanBtn.textContent = 'Starting...';
+
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          showError('Camera API not supported in this browser.');
+          scanBtn.textContent = 'Start Camera';
+          return;
+        }
+
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: 'environment' },
+            audio: false
+          });  // rear camera
+
+          video.srcObject = stream;
+          scanning = true;
+          output.textContent = 'Scanning... Move QR into view.';
+          scanBtn.textContent = 'Scanning...';
+          requestAnimationFrame(tick);
+        } catch (e) {
+          showError('Camera error: ' + e.name + ' - ' + e.message);
+          scanBtn.textContent = 'Start Camera';
+        }
+      }
+
+      // Decode QR from uploaded image
+      function scanFromFile(file) {
+        clearError();
+        sendBtn.disabled = true;
+        lastCode = null;
+        output.textContent = 'Reading image...';
+
+        const img = new Image();
+        img.onload = function () {
+          canvas.width = img.width;
+          canvas.height = img.height;
+          ctx.drawImage(img, 0, 0);
+          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const code = jsQR(imageData.data, imageData.width, imageData.height);
+          if (code) {
+            handleScannedText(code.data, 'image');
+          } else {
+            output.textContent = 'No QR found in image.';
+          }
+        };
+        img.onerror = () => {
+          showError('Could not read image file.');
+        };
+        img.src = URL.createObjectURL(file);
+      }
+
+      async function sendToSheet() {
+        if (!lastCode) {
+          showError('No QR scanned yet.');
+          return;
+        }
+        clearError();
+        output.textContent = 'Sending to Sheet...';
+
+        try {
+          const res = await fetch(SCRIPT_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              // This hits the QR branch in your Apps Script
+              qr: lastCode
+              // If you also want to link to a student, add: cardId: '...'
+            })
+          });
+
+          await res.text();
+          output.textContent = 'Saved: ' + lastCode;
+        } catch (err) {
+          showError('Send error: ' + err);
+        }
+      }
+
+      scanBtn.addEventListener('click', () => {
+        if (scanning) {
+          stopCamera();
+          output.textContent = 'Scanning stopped.';
+        } else {
+          startCamera();
+        }
+      });
+
+      fileInput.addEventListener('change', (e) => {
+        stopCamera();
+        const file = e.target.files[0];
+        if (file) scanFromFile(file);
+      });
+
+      sendBtn.addEventListener('click', sendToSheet);
+    </script>
+  </body>
+</html>
